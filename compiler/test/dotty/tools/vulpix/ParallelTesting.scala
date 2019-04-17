@@ -193,8 +193,12 @@ trait ParallelTesting extends RunnerOrchestration { self =>
           testSource.compilationGroups.map(files => compile(files, flags, false, outDir))  // TODO? only `compile` option?
       }
 
-    def onSuccess(testSource: TestSource, reporters: Seq[TestReporter]): Unit = ()
-    def onFailure(testSource: TestSource, reporters: Seq[TestReporter]): Unit = ()
+    def onSuccess(testSource: TestSource, reporters: Seq[TestReporter], logger: LoggedRunnable): Unit = ()
+    def onFailure(testSource: TestSource, reporters: Seq[TestReporter], logger: LoggedRunnable): Unit = {
+      echo(s"    Compilation failed for: '${testSource.title}'                               ")
+      reporters.filter(reporterFailed).foreach(logger.logReporterContents)
+      logBuildInstructions(testSource, reporters)
+    }
 
     def countErrorsAndWarnings(reporters: Seq[TestReporter]): (Int, Int) =
       reporters.foldLeft((0, 0)) { case ((err, warn), r) => (err + r.errorCount, warn + r.warningCount) }
@@ -203,17 +207,11 @@ trait ParallelTesting extends RunnerOrchestration { self =>
     def countWarnings(reporters: Seq[TestReporter]) = countErrorsAndWarnings(reporters)._2
     def reporterFailed(r: TestReporter) = r.compilerCrashed || r.errorCount > 0
 
-    protected def encapsulatedCompilation(testSource: TestSource) = new LoggedRunnable {
+    protected def encapsulatedCompilation(testSource: TestSource) = new LoggedRunnable { self =>
       def checkTestSource(): Unit = tryCompile(testSource) {
         val reporters = compileTestSource(testSource)
-
-        if (!reporters.exists(reporterFailed)) onSuccess(testSource, reporters)
-        else {                                  onFailure(testSource, reporters)
-          echo(s"    Compilation failed for: '${testSource.title}'                               ")
-          reporters.filter(reporterFailed).foreach(logReporterContents)
-          logBuildInstructions(testSource, reporters)
-        }
-        registerCompletion()
+        if (!reporters.exists(reporterFailed)) onSuccess(testSource, reporters, self)
+        else                                   onFailure(testSource, reporters, self)
       }
     }
   }
@@ -641,7 +639,7 @@ trait ParallelTesting extends RunnerOrchestration { self =>
     }
 
 
-    override def onSuccess(testSource: TestSource, reporters: Seq[TestReporter]) =
+    override def onSuccess(testSource: TestSource, reporters: Seq[TestReporter], logger: LoggedRunnable) =
       verifyOutput(checkFile(testSource), testSource.outDir, testSource, countWarnings(reporters))
   }
 
