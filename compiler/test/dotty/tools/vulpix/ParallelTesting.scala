@@ -196,12 +196,13 @@ trait ParallelTesting extends RunnerOrchestration { self =>
 
     protected def encapsulatedCompilation(testSource: TestSource) = new LoggedRunnable {
       def checkTestSource(): Unit = tryCompile(testSource) {
-        compileTestSource(testSource)
-          .filter(r => r.compilerCrashed || r.errorCount > 0)
-          .foreach { r =>
-            logReporterContents(r)
-            logBuildInstructions(r, testSource, r.errorCount, r.warningCount)
-          }
+        val failed = compileTestSource(testSource).filter(r => r.compilerCrashed || r.errorCount > 0)
+        if (failed.isEmpty) verifier()
+        else {
+          echo(s"    Compilation failed for: '${testSource.title}'                               ")
+          failed.foreach(logReporterContents)
+          logBuildInstructions(testSource, failed)
+        }
         registerCompletion()
       }
     }
@@ -283,8 +284,10 @@ trait ParallelTesting extends RunnerOrchestration { self =>
     /** Number of failed tests */
     def failureCount: Int = _failureCount
 
-    protected def logBuildInstructions(reporter: TestReporter, testSource: TestSource, err: Int, war: Int) = {
-      val errorMsg = testSource.buildInstructions(reporter.errorCount, reporter.warningCount)
+    protected def logBuildInstructions(testSource: TestSource, reporters: Seq[TestReporter]) = {
+      val (errCount, warCount) = reporters.foldLeft((0, 0)) { case ((err, war), r) =>
+        (err + r.errCount, war + r.warningCount) }
+      val errorMsg = testSource.buildInstructions(err, war)
       addFailureInstruction(errorMsg)
       failTestSource(testSource)
     }
