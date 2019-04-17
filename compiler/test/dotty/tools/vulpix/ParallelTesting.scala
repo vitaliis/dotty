@@ -193,19 +193,25 @@ trait ParallelTesting extends RunnerOrchestration { self =>
           testSource.compilationGroups.map(files => compile(files, flags, false, outDir))  // TODO? only `compile` option?
       }
 
-    def verifyOutput(testSource: TestSource, warnings: Int): Unit = ()
+    def onSuccess(testSource: TestSource, reporters: Seq[TestReporter]): Unit = ()
+    def onFailure(testSource: TestSource, reporters: Seq[TestReporter]): Unit = ()
+
+    def countErrorsAndWarnings(reporters: Seq[TestReporter]): (Int, Int) =
+      failed.foldLeft((0, 0)) { case ((err, warn), r) => (err + r.errorCount, warn + r.warningCount) }
+
+    def countErrors  (reporters: Seq[TestReporter]) = countErrorsAndWarnings(reporters)._1
+    def countWarnings(reporters: Seq[TestReporter]) = countErrorsAndWarnings(reporters)._2
 
     protected def encapsulatedCompilation(testSource: TestSource) = new LoggedRunnable {
       def checkTestSource(): Unit = tryCompile(testSource) {
-        val failed = compileTestSource(testSource).filter(r => r.compilerCrashed || r.errorCount > 0)
-        val (errCount, warnCount) = failed.foldLeft((0, 0)) { case ((err, warn), r) =>
-          (err + r.errorCount, warn + r.warningCount) }
+        val reporters = compileTestSource(testSource)
+        val failed    = reporters.exists(r => r.compilerCrashed || r.errorCount > 0)
 
-        if (failed.isEmpty) verifyOutput(testSource, warnCount)
-        else {
+        if (!failed) onSuccess(testSource, reporters)
+        else {       onFailure(testSource, reporters)
           echo(s"    Compilation failed for: '${testSource.title}'                               ")
           failed.foreach(logReporterContents)
-          logBuildInstructions(testSource, errCount, warnCount)
+          logBuildInstructions(testSource, reporters)
         }
         registerCompletion()
       }
@@ -288,7 +294,8 @@ trait ParallelTesting extends RunnerOrchestration { self =>
     /** Number of failed tests */
     def failureCount: Int = _failureCount
 
-    protected def logBuildInstructions(testSource: TestSource, errCount: Int, warnCount: Int) = {
+    protected def logBuildInstructions(testSource: TestSource, reporters: Seq[TestReporter]) = {
+      val (errCount, warnCount) = countErrorsAndWarnings(reporters)
       val errorMsg = testSource.buildInstructions(errCount, warnCount)
       addFailureInstruction(errorMsg)
       failTestSource(testSource)
@@ -589,7 +596,7 @@ trait ParallelTesting extends RunnerOrchestration { self =>
       }
     }
 
-    private def verifyOutput(checkFile: Option[JFile], dir: JFile, testSource: TestSource, warnings: Int) = {
+    private[this] def verifyOutput(checkFile: Option[JFile], dir: JFile, testSource: TestSource, warnings: Int) = {
       if (Properties.testsNoRun) addNoRunWarning()
       else runMain(testSource.runClassPath) match {
         case Success(_) if !checkFile.isDefined || !checkFile.get.exists => // success!
@@ -625,60 +632,17 @@ trait ParallelTesting extends RunnerOrchestration { self =>
       }
     }
 
-    override protected def encapsulatedCompilation(testSource: TestSource) = new LoggedRunnable {
-      def checkTestSource(): Unit = tryCompile(testSource) {
-        val (compilerCrashed, errorCount, warningCount, verifier: Function0[Unit]) = testSource match {
-          case testSource @ JointCompilationSource(_, files, flags, outDir, fromTasty, decompilation) =>
-            val checkFile = files.flatMap { file =>
-              if (file.isDirectory) Nil
-              else {
-                val fname = file.getAbsolutePath.reverse.dropWhile(_ != '.').reverse + "check"
-                val checkFile = new JFile(fname)
-                if (checkFile.exists) List(checkFile)
-                else Nil
-              }
-            }.headOption
-            val reporter =
-              if (fromTasty) compileFromTasty(flags, false, outDir)
-              else compile(testSource.sourceFiles, flags, false, outDir)
+    def checkFile(testSource: TestSource): Option[JFile] = ts match {
+      case testSource: JointCompilationSource => testSource.files.filter(f => !file.isDirectory).flatMap { file =>
+        Option(new JFile(file.getAbsolutePath.reverse.dropWhile(_ != '.').reverse + "check")).filter(_.exists) }.headOption
 
-            if (reporter.compilerCrashed || reporter.errorCount > 0) {
-              logReporterContents(reporter)
-              logBuildInstructions(testSource, reporter.errorCount, reporter.warningCount)
-            }
-
-            (reporter.compilerCrashed, reporter.errorCount, reporter.warningCount, () => verifyOutput(checkFile, outDir, testSource, reporter.warningCount))
-
-          case testSource @ SeparateCompilationSource(_, dir, flags, outDir) =>
-            val checkFile = new JFile(dir.getAbsolutePath.reverse.dropWhile(_ == JFile.separatorChar).reverse + ".check")
-            val reporters = testSource.compilationGroups.map(compile(_, flags, false, outDir))
-            val compilerCrashed = reporters.exists(_.compilerCrashed)
-            val (errorCount, warningCount) =
-              reporters.foldLeft((0,0)) { case ((errors, warnings), reporter) =>
-                if (reporter.errorCount > 0)
-                  logBuildInstructions(reporter, testSource, reporter.errorCount, reporter.warningCount)
-
-                (errors + reporter.errorCount, warnings + reporter.warningCount)
-              }
-
-            if (errorCount > 0) {
-              reporters.foreach(logReporterContents)
-              logBuildInstructions(reporters.head, testSource, errorCount, warningCount)
-            }
-
-            (compilerCrashed, errorCount, warningCount, () => verifyOutput(Some(checkFile), outDir, testSource, warningCount))
-        }
-
-        if (!compilerCrashed && errorCount == 0) verifier()
-        else {
-          echo(s"    Compilation failed for: '${testSource.title}'                               ")
-          val buildInstr = testSource.buildInstructions(errorCount, warningCount)
-          addFailureInstruction(buildInstr)
-          failTestSource(testSource)
-        }
-        registerCompletion()
-      }
+      case testSource @ SeparateCompilationSource =>
+        Option(new JFile(dir.getAbsolutePath.reverse.dropWhile(_ == JFile.separatorChar).reverse + ".check")).filter(_.exists)
     }
+
+
+    override def onSuccess(testSource: TestSource, reporters: Seq[TestReporter]) =
+      verifyOutput(checkFile(testSource), testSource.outDir, testSource, countWarnings(reporters))
   }
 
   private final class NegTest(testSources: List[TestSource], times: Int, threadLimit: Option[Int], suppressAllOutput: Boolean)(implicit summaryReport: SummaryReporting)
