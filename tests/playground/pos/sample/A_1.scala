@@ -1,3 +1,3 @@
 object A {
-  val name = "World"trashed
+  val name = "World"afwsf
 }
