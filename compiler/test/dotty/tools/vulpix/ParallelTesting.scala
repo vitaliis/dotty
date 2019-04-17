@@ -180,8 +180,8 @@ trait ParallelTesting extends RunnerOrchestration { self =>
       .toList.sortBy(_._1).map(_._2.filter(isSourceFile).sorted)
   }
 
-  trait CompilationLogic {
-    def verifyOutput(files: List[JFile]) = {
+  private trait CompilationLogic { this: Test =>
+    def verifyOutput(files: Seq[JFile], outDir: JFile, testSource: TestSource, warningCount: Int) = {
       checkFile(files, "decompiled") match {
         case Some(checkFile) =>
           val ignoredFilePathLine = "/** Decompiled from"
@@ -199,7 +199,7 @@ trait ParallelTesting extends RunnerOrchestration { self =>
             dumpOutputToFile(checkFile, output)
 
             // Print build instructions to file and summary:
-            val buildInstr = testSource.buildInstructions(0, rep.warningCount)
+            val buildInstr = testSource.buildInstructions(0, warningCount)
             addFailureInstruction(buildInstr)
 
             // Fail target:
@@ -209,7 +209,7 @@ trait ParallelTesting extends RunnerOrchestration { self =>
       }
     }
 
-    def checkFile(files: List[JFile], extension: String): Option[JFile] = files.flatMap { file =>
+    def checkFile(files: Seq[JFile], extension: String): Option[JFile] = files.flatMap { file =>
       if (file.isDirectory) Nil
       else {
         val fname = file.getAbsolutePath.reverse.dropWhile(_ != '.').reverse + extension
@@ -220,13 +220,13 @@ trait ParallelTesting extends RunnerOrchestration { self =>
     }.headOption
 
     /** @return (compilerCrashed, errorCount, warningCount, reporter) */
-    def compileTestSource(testSource: TestSource): List[Reporter] =
+    def compileTestSource(testSource: TestSource): List[TestReporter] =
       testSource match {
         case testSource @ JointCompilationSource(name, files, flags, outDir, fromTasty, decompilation) =>
           val reporter =
-                 if (decompilation) { decompile       (flags, false, outDir) ; verifyOutput(files) }
-            else if (fromTasty    )   compileFromTasty(flags, false, outDir)
-            else compile(testSource.sourceFiles,       flags, false, outDir)
+                 if (decompilation) { val rep = decompile(flags, false, outDir); verifyOutput(files, outDir, testSource, rep.warningCount); rep }
+            else if (fromTasty    )      compileFromTasty(flags, false, outDir)
+            else compile(testSource.sourceFiles,          flags, false, outDir)
           List(reporter)
 
         case testSource @ SeparateCompilationSource(_, dir, flags, outDir) =>
@@ -249,7 +249,7 @@ trait ParallelTesting extends RunnerOrchestration { self =>
   /** Each `Test` takes the `testSources` and performs the compilation and assertions
    *  according to the implementing class "neg", "run" or "pos".
    */
-  private abstract class Test(testSources: List[TestSource], times: Int, threadLimit: Option[Int], suppressAllOutput: Boolean)(implicit val summaryReport: SummaryReporting) { test =>
+  private class Test(testSources: List[TestSource], times: Int, threadLimit: Option[Int], suppressAllOutput: Boolean)(implicit val summaryReport: SummaryReporting) extends CompilationLogic { test =>
 
     import summaryReport._
 
@@ -279,8 +279,6 @@ trait ParallelTesting extends RunnerOrchestration { self =>
         summaryReport.echoToLog(logBuffer.iterator)
       }
     }
-    /** Actual compilation run logic, the test behaviour is defined here */
-    protected def encapsulatedCompilation(testSource: TestSource): LoggedRunnable
 
     /** All testSources left after filtering out */
     private val filteredSources =
@@ -605,7 +603,7 @@ trait ParallelTesting extends RunnerOrchestration { self =>
 
   private final class PosTest(testSources: List[TestSource], times: Int, threadLimit: Option[Int], suppressAllOutput: Boolean)(implicit summaryReport: SummaryReporting)
   extends Test(testSources, times, threadLimit, suppressAllOutput) {
-    protected def encapsulatedCompilation(testSource: TestSource) = new LoggedRunnable {
+    override protected def encapsulatedCompilation(testSource: TestSource) = new LoggedRunnable {
       def checkTestSource(): Unit = tryCompile(testSource) {
         testSource match {
           case testSource @ JointCompilationSource(name, files, flags, outDir, fromTasty, decompilation) =>
@@ -732,7 +730,7 @@ trait ParallelTesting extends RunnerOrchestration { self =>
       }
     }
 
-    protected def encapsulatedCompilation(testSource: TestSource) = new LoggedRunnable {
+    override protected def encapsulatedCompilation(testSource: TestSource) = new LoggedRunnable {
       def checkTestSource(): Unit = tryCompile(testSource) {
         val (compilerCrashed, errorCount, warningCount, verifier: Function0[Unit]) = testSource match {
           case testSource @ JointCompilationSource(_, files, flags, outDir, fromTasty, decompilation) =>
@@ -790,7 +788,7 @@ trait ParallelTesting extends RunnerOrchestration { self =>
 
   private final class NegTest(testSources: List[TestSource], times: Int, threadLimit: Option[Int], suppressAllOutput: Boolean)(implicit summaryReport: SummaryReporting)
   extends Test(testSources, times, threadLimit, suppressAllOutput) {
-    protected def encapsulatedCompilation(testSource: TestSource) = new LoggedRunnable {
+    override protected def encapsulatedCompilation(testSource: TestSource) = new LoggedRunnable {
       def checkTestSource(): Unit = tryCompile(testSource) {
         // In neg-tests we allow two types of error annotations,
         // "nopos-error" which doesn't care about position and "error" which
@@ -915,7 +913,7 @@ trait ParallelTesting extends RunnerOrchestration { self =>
 
   private final class NoCrashTest(testSources: List[TestSource], times: Int, threadLimit: Option[Int], suppressAllOutput: Boolean)(implicit summaryReport: SummaryReporting)
     extends Test(testSources, times, threadLimit, suppressAllOutput) {
-    protected def encapsulatedCompilation(testSource: TestSource) = new LoggedRunnable {
+    override protected def encapsulatedCompilation(testSource: TestSource) = new LoggedRunnable {
       def checkTestSource(): Unit = tryCompile(testSource) {
         def fail(msg: String): Nothing = {
           echo(msg)
