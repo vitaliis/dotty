@@ -197,20 +197,20 @@ trait ParallelTesting extends RunnerOrchestration { self =>
     def onFailure(testSource: TestSource, reporters: Seq[TestReporter]): Unit = ()
 
     def countErrorsAndWarnings(reporters: Seq[TestReporter]): (Int, Int) =
-      failed.foldLeft((0, 0)) { case ((err, warn), r) => (err + r.errorCount, warn + r.warningCount) }
+      reporters.foldLeft((0, 0)) { case ((err, warn), r) => (err + r.errorCount, warn + r.warningCount) }
 
     def countErrors  (reporters: Seq[TestReporter]) = countErrorsAndWarnings(reporters)._1
     def countWarnings(reporters: Seq[TestReporter]) = countErrorsAndWarnings(reporters)._2
+    def reporterFailed(r: TestReporter) = r.compilerCrashed || r.errorCount > 0
 
     protected def encapsulatedCompilation(testSource: TestSource) = new LoggedRunnable {
       def checkTestSource(): Unit = tryCompile(testSource) {
         val reporters = compileTestSource(testSource)
-        val failed    = reporters.exists(r => r.compilerCrashed || r.errorCount > 0)
 
-        if (!failed) onSuccess(testSource, reporters)
-        else {       onFailure(testSource, reporters)
+        if (!reporters.exists(reporterFailed)) onSuccess(testSource, reporters)
+        else {                                  onFailure(testSource, reporters)
           echo(s"    Compilation failed for: '${testSource.title}'                               ")
-          failed.foreach(logReporterContents)
+          reporters.filter(reporterFailed).foreach(logReporterContents)
           logBuildInstructions(testSource, reporters)
         }
         registerCompletion()
@@ -632,12 +632,12 @@ trait ParallelTesting extends RunnerOrchestration { self =>
       }
     }
 
-    def checkFile(testSource: TestSource): Option[JFile] = ts match {
-      case testSource: JointCompilationSource => testSource.files.filter(f => !file.isDirectory).flatMap { file =>
+    def checkFile(testSource: TestSource): Option[JFile] = testSource match {
+      case ts: JointCompilationSource => ts.files.filter(f => !f.isDirectory).flatMap { file =>
         Option(new JFile(file.getAbsolutePath.reverse.dropWhile(_ != '.').reverse + "check")).filter(_.exists) }.headOption
 
-      case testSource @ SeparateCompilationSource =>
-        Option(new JFile(dir.getAbsolutePath.reverse.dropWhile(_ == JFile.separatorChar).reverse + ".check")).filter(_.exists)
+      case ts: SeparateCompilationSource =>
+        Option(new JFile(ts.dir.getAbsolutePath.reverse.dropWhile(_ == JFile.separatorChar).reverse + ".check")).filter(_.exists)
     }
 
 
