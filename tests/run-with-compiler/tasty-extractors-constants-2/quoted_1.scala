@@ -45,9 +45,9 @@ object Macros {
   }
 
   def power(n: Expr[Int], x: Expr[Double])(implicit reflect: Reflection): Expr[Double] = {
-    import quoted.matching.Const
+    import quoted.matching.Literal
     n match {
-      case Const(n1) => powerCode(n1, x)
+      case Literal(n1) => powerCode(n1, x)
       case _ => '{ dynamicPower($n, $x) }
     }
   }

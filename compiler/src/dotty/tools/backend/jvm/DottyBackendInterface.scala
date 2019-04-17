@@ -482,19 +482,11 @@ class DottyBackendInterface(outputDirectory: AbstractFile, val superCallsMap: Ma
 
   private def verifySignature(sym: Symbol, sig: String)(implicit ctx: Context): Unit = {
     import scala.tools.asm.util.CheckClassAdapter
-    def wrap(body: => Unit): Unit = {
-      try body
-      catch {
-        case ex: Throwable =>
-          ctx.error(i"""|compiler bug: created invalid generic signature for $sym in ${sym.denot.owner.showFullName}
-                      |signature: $sig
-                      |if this is reproducible, please report bug at https://github.com/lampepfl/dotty/issues
-                   """.trim, sym.sourcePos)
-          throw  ex
-      }
-    }
+    def wrap(body: => Unit): Boolean =
+      try { body; true }
+      catch { case ex: Throwable => println(ex.getMessage); false }
 
-    wrap {
+    val valid = wrap {
       if (sym.is(Flags.Method)) {
         CheckClassAdapter.checkMethodSignature(sig)
       }
@@ -504,6 +496,14 @@ class DottyBackendInterface(outputDirectory: AbstractFile, val superCallsMap: Ma
       else {
         CheckClassAdapter.checkClassSignature(sig)
       }
+    }
+
+    if (!valid) {
+      ctx.error(
+        i"""|compiler bug: created invalid generic signature for $sym in ${sym.denot.owner.showFullName}
+            |signature: $sig
+            |if this is reproducible, please report bug at https://github.com/lampepfl/dotty/issues
+        """.trim, sym.sourcePos)
     }
   }
 
@@ -841,14 +841,8 @@ class DottyBackendInterface(outputDirectory: AbstractFile, val superCallsMap: Ma
 
     def addRemoteRemoteExceptionAnnotation: Unit = ()
 
-    def samMethod(): Symbol = ctx.atPhase(ctx.erasurePhase) { implicit ctx =>
-      toDenot(sym).info.abstractTermMembers.toList match {
-        case x :: Nil => x.symbol
-        case Nil => abort(s"${sym.show} is not a functional interface. It doesn't have abstract methods")
-        case xs => abort(s"${sym.show} is not a functional interface. " +
-          s"It has the following abstract methods: ${xs.map(_.name).mkString(", ")}")
-      }
-    }
+    def samMethod(): Symbol =
+      toDenot(sym).info.abstractTermMembers.headOption.getOrElse(toDenot(sym).info.member(nme.apply)).symbol
 
     def isFunctionClass: Boolean =
       defn.isFunctionClass(sym)

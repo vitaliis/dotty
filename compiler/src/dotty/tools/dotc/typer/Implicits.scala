@@ -667,36 +667,29 @@ trait Implicits { self: Typer =>
         EmptyTree
     }
 
-    def synthesizedTypeTag(formal: Type): Tree = {
-      def quotedType(t: Type) = {
-        if (StagingContext.level == 0)
-          ctx.compilationUnit.needsStaging = true // We will need to run ReifyQuotes
-        ref(defn.InternalQuoted_typeQuote).appliedToType(t)
-      }
-      formal.argInfos match {
-        case arg :: Nil if !arg.typeSymbol.is(Param) =>
-          object bindFreeVars extends TypeMap {
-            var ok = true
-            def apply(t: Type) = t match {
-              case t @ TypeRef(NoPrefix, _) =>
-                inferImplicit(defn.QuotedTypeType.appliedTo(t), EmptyTree, span) match {
-                  case SearchSuccess(tag, _, _) if tag.tpe.isStable =>
-                    tag.tpe.select(defn.QuotedType_splice)
-                  case _ =>
-                    ok = false
-                    t
-                }
-              case _ => t
-            }
+    def synthesizedTypeTag(formal: Type): Tree = formal.argInfos match {
+      case arg :: Nil if !arg.typeSymbol.is(Param) =>
+        object bindFreeVars extends TypeMap {
+          var ok = true
+          def apply(t: Type) = t match {
+            case t @ TypeRef(NoPrefix, _) =>
+              inferImplicit(defn.QuotedTypeType.appliedTo(t), EmptyTree, span) match {
+                case SearchSuccess(tag, _, _) if tag.tpe.isStable =>
+                  tag.tpe.select(defn.QuotedType_splice)
+                case _ =>
+                  ok = false
+                  t
+              }
+            case _ => t
           }
-          val tag = bindFreeVars(arg)
-          if (bindFreeVars.ok) quotedType(tag)
-          else EmptyTree
-        case arg :: Nil if ctx.inInlineMethod =>
-          quotedType(arg)
-        case _ =>
-          EmptyTree
-      }
+        }
+        val tag = bindFreeVars(arg)
+        if (bindFreeVars.ok) ref(defn.InternalQuoted_typeQuote).appliedToType(tag)
+        else EmptyTree
+      case arg :: Nil if ctx.inInlineMethod =>
+        ref(defn.InternalQuoted_typeQuote).appliedToType(arg)
+      case _ =>
+        EmptyTree
     }
 
     def synthesizedTastyContext(formal: Type): Tree =
@@ -1413,10 +1406,9 @@ abstract class SearchHistory { outer =>
           if (cand1.ref == cand.ref) {
             val wideTp = tp.widenExpr
             lazy val wildTp = wildApprox(wideTp)
-            lazy val tpSize = wideTp.typeSize
             if (belowByname && (wildTp <:< wildPt)) false
-            else if (tpSize > ptSize || wideTp.coveringSet != ptCoveringSet) loop(tl, isByname(tp) || belowByname)
-            else tpSize < ptSize || wildTp =:= wildPt || loop(tl, isByname(tp) || belowByname)
+            else if ((wideTp.typeSize < ptSize && wideTp.coveringSet == ptCoveringSet) || (wildTp =:= wildPt)) true
+            else loop(tl, isByname(tp) || belowByname)
           }
           else loop(tl, isByname(tp) || belowByname)
       }
@@ -1620,7 +1612,7 @@ final class SearchRoot extends SearchHistory {
             // Substitute dictionary references into dictionary entry RHSs
             val rhsMap = new TreeTypeMap(treeMap = {
               case id: Ident if vsymMap.contains(id.symbol) =>
-                tpd.ref(vsymMap(id.symbol))
+                tpd.ref(vsymMap(id.symbol)).withSpan(id.span)
               case tree => tree
             })
             val nrhss = rhss.map(rhsMap(_))
@@ -1644,7 +1636,7 @@ final class SearchRoot extends SearchHistory {
 
             val res = resMap(tree)
 
-            val blk = Inliner.reposition(Block(classDef :: inst :: Nil, res), span)
+            val blk = Block(classDef :: inst :: Nil, res)
 
             success.copy(tree = blk)(success.tstate, success.gstate)
           }

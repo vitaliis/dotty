@@ -449,7 +449,8 @@ class Typer extends Namer
       }
     case qual =>
       if (tree.name.isTypeName) checkStable(qual.tpe, qual.sourcePos)
-      val select = checkValue(assignType(cpy.Select(tree)(qual, tree.name), qual), pt)
+      val select = Applications.handleMeta(
+        checkValue(assignType(cpy.Select(tree)(qual, tree.name), qual), pt))
       if (select.tpe ne TryDynamicCallType) ConstFold(checkStableIdentPattern(select, pt))
       else if (pt.isInstanceOf[FunOrPolyProto] || pt == AssignProto) select
       else typedDynamicSelect(tree, Nil, pt)
@@ -1935,10 +1936,8 @@ class Typer extends Namer
         ctx.warning("Canceled splice directly inside a quote. '{ ${ XYZ } } is equivalent to XYZ.", tree.sourcePos)
         typed(innerExpr, pt)
       case quoted if quoted.isType =>
-        ctx.compilationUnit.needsStaging = true
         typedTypeApply(untpd.TypeApply(untpd.ref(defn.InternalQuoted_typeQuoteR), quoted :: Nil), pt)(quoteContext).withSpan(tree.span)
       case quoted =>
-        ctx.compilationUnit.needsStaging = true
         if (ctx.mode.is(Mode.Pattern) && level == 0) {
           val exprPt = pt.baseType(defn.QuotedExprClass)
           val quotedPt = if (exprPt.exists) exprPt.argTypesHi.head else defn.AnyType
@@ -1987,9 +1986,7 @@ class Typer extends Namer
               case t => t
             }
             val bindingExprTpe = AppliedType(defn.QuotedMatchingBindingType, bindingType :: Nil)
-            assert(ddef.name.startsWith("$"))
-            val bindName = ddef.name.toString.stripPrefix("$").toTermName
-            val sym = ctx0.newPatternBoundSymbol(bindName, bindingExprTpe, ddef.span)
+            val sym = ctx0.newPatternBoundSymbol(ddef.name, bindingExprTpe, ddef.span)
             patBuf += Bind(sym, untpd.Ident(nme.WILDCARD).withType(bindingExprTpe)).withSpan(ddef.span)
           }
           super.transform(tree)
@@ -2013,36 +2010,21 @@ class Typer extends Namer
         ctx.warning("Canceled quote directly inside a splice. ${ '{ XYZ } } is equivalent to XYZ.", tree.sourcePos)
         typed(innerExpr, pt)
       case expr =>
-        ctx.compilationUnit.needsStaging = true
         if (ctx.mode.is(Mode.QuotedPattern) && level == 1) {
-          if (isFullyDefined(pt, ForceDegree.all)) {
-            def spliceOwner(ctx: Context): Symbol =
-              if (ctx.mode.is(Mode.QuotedPattern)) spliceOwner(ctx.outer) else ctx.owner
-            val pat = typedPattern(expr, defn.QuotedExprType.appliedTo(pt))(
-              spliceContext.retractMode(Mode.QuotedPattern).withOwner(spliceOwner(ctx)))
-            Splice(pat)
-          } else {
-            ctx.error(i"Type must be fully defined.\nConsider annotating the splice using a type ascription:\n  ($tree: XYZ).", expr.sourcePos)
-            tree.withType(UnspecifiedErrorType)
-          }
+          fullyDefinedType(pt, "quoted pattern selector", tree.span)
+          def spliceOwner(ctx: Context): Symbol =
+            if (ctx.mode.is(Mode.QuotedPattern)) spliceOwner(ctx.outer) else ctx.owner
+          val pat = typedPattern(expr, defn.QuotedExprType.appliedTo(pt))(
+            spliceContext.retractMode(Mode.QuotedPattern).withOwner(spliceOwner(ctx)))
+          Splice(pat)
         }
-        else {
-          if (StagingContext.level == 0) {
-            // Mark the first inline method from the context as a macro
-            def markAsMacro(c: Context): Unit =
-              if (c.owner eq c.outer.owner) markAsMacro(c.outer)
-              else if (c.owner.isInlineMethod) c.owner.setFlag(Macro)
-              else if (!c.outer.owner.is(Package)) markAsMacro(c.outer)
-            markAsMacro(ctx)
-          }
+        else
           typedApply(untpd.Apply(untpd.ref(defn.InternalQuoted_exprSpliceR), tree.expr), pt)(spliceContext).withSpan(tree.span)
-        }
     }
   }
 
   /** Translate ${ t: Type[T] }` into type `t.splice` while tracking the quotation level in the context */
   def typedTypSplice(tree: untpd.TypSplice, pt: Type)(implicit ctx: Context): Tree = track("typedTypSplice") {
-    ctx.compilationUnit.needsStaging = true
     checkSpliceOutsideQuote(tree)
     typedSelect(untpd.Select(tree.expr, tpnme.splice), pt)(spliceContext).withSpan(tree.span)
   }

@@ -12,7 +12,7 @@ import java.util.concurrent.{TimeUnit, TimeoutException, Executors => JExecutors
 
 import scala.collection.mutable
 import scala.io.Source
-import scala.util.{Random, Try}
+import scala.util.{Random, Try, Failure => TryFailure, Success => TrySuccess}
 import scala.util.control.NonFatal
 import scala.util.matching.Regex
 
@@ -180,23 +180,27 @@ trait ParallelTesting extends RunnerOrchestration { self =>
       }
       .toList.sortBy(_._1).map(_._2.filter(isSourceFile).sorted)
 
-    def sourceFiles: Array[JFile] = compilationGroups.flatten.filter(isSourceFile).toArray
+    def sourceFiles: Array[JFile] = compilationGroups.flatten.toArray
   }
 
   private trait CompilationLogic { this: Test =>
-    val suppressErrors = false
+    def suppressErrors = false
 
-    final def compileTestSource(testSource: TestSource): Either[Throwable, List[TestReporter]] =
+    /**
+     * Compiles the test source.
+     * @return The reporters containing the results of all the compilation runs for this test source.
+     */
+    private final def compileTestSource(testSource: TestSource): Try[List[TestReporter]] =
       Try(testSource match {
         case testSource @ JointCompilationSource(name, files, flags, outDir, fromTasty, decompilation) =>
           val reporter =
-            if (fromTasty) compileFromTasty(               flags, suppressErrors, outDir)
-            else           compile(testSource.sourceFiles, flags, suppressErrors, outDir)
+            if (fromTasty) compileFromTasty(flags, suppressErrors, outDir)
+            else compile(testSource.sourceFiles, flags, suppressErrors, outDir)
           List(reporter)
 
         case testSource @ SeparateCompilationSource(_, dir, flags, outDir) =>
           testSource.compilationGroups.map(files => compile(files, flags, suppressErrors, outDir))  // TODO? only `compile` option?
-      }).toEither
+      })
 
     final def countErrorsAndWarnings(reporters: Seq[TestReporter]): (Int, Int) =
       reporters.foldLeft((0, 0)) { case ((err, warn), r) => (err + r.errorCount, warn + r.warningCount) }
@@ -205,14 +209,22 @@ trait ParallelTesting extends RunnerOrchestration { self =>
     final def countWarnings(reporters: Seq[TestReporter]) = countErrorsAndWarnings(reporters)._2
     final def reporterFailed(r: TestReporter) = r.compilerCrashed || r.errorCount > 0
 
+    /**
+     * For a given test source, returns a check file against which the result of the test run
+     * should be compared. Is used by implementations of this trait.
+     */
     final def checkFile(testSource: TestSource): Option[JFile] = (testSource match {
       case ts: JointCompilationSource =>
-        ts.files.filter(f => !f.isDirectory).map { f => new JFile(f.getAbsolutePath.replaceFirst("\\.scala$", ".check")) }.headOption
+        ts.files.collectFirst { case f if !f.isDirectory => new JFile(f.getAbsolutePath.replaceFirst("\\.scala$", ".check")) }
 
       case ts: SeparateCompilationSource =>
         Option(new JFile(ts.dir.getAbsolutePath + ".check"))
     }).filter(_.exists)
 
+    /**
+     * Checks if the given actual lines are the same as the ones in the check file.
+     * If not, fails the test.
+     */
     final def diffTest(testSource: TestSource, checkFile: JFile, actual: List[String]) = {
       val expected = Source.fromFile(checkFile, "UTF-8").getLines().toList
       for (msg <- diffMessage(testSource.title, actual, expected)) {
@@ -222,7 +234,8 @@ trait ParallelTesting extends RunnerOrchestration { self =>
       }
     }
 
-    def encapsulatedCompilation(testSource: TestSource) = new LoggedRunnable { self =>
+    /** Entry point: runs the test */
+    final def encapsulatedCompilation(testSource: TestSource) = new LoggedRunnable { self =>
       def checkTestSource(): Unit = tryCompile(testSource) {
         val reportersOrCrash = compileTestSource(testSource)
         onComplete(testSource, reportersOrCrash, self)
@@ -230,17 +243,34 @@ trait ParallelTesting extends RunnerOrchestration { self =>
       }
     }
 
-    final def onComplete(testSource: TestSource, reportersOrCrash: Either[Throwable, Seq[TestReporter]], logger: LoggedRunnable): Unit =
-      reportersOrCrash.fold(
-        exn => onFailure(testSource, Nil, logger, Some(s"Fatal compiler crash when compiling: ${testSource.title}:\n${exn.getMessage}\n${exn.getStackTrace.mkString("\n")}"))
-      , reporters => testFailed(testSource, reporters).fold
-        (       onSuccess(testSource, reporters, logger                                ) )
-        (msg => onFailure(testSource, reporters, logger, Option(msg).filter(_.nonEmpty)) ) )
+    /** This callback is executed once the compilation of this test source finished */
+    private final def onComplete(testSource: TestSource, reportersOrCrash: Try[Seq[TestReporter]], logger: LoggedRunnable): Unit =
+      reportersOrCrash match {
+        case TryFailure(exn) => onFailure(testSource, Nil, logger, Some(s"Fatal compiler crash when compiling: ${testSource.title}:\n${exn.getMessage}\n${exn.getStackTrace.mkString("\n")}"))
+        case TrySuccess(reporters) => maybeFailureMessage(testSource, reporters) match {
+          case Some(msg) => onFailure(testSource, reporters, logger, Option(msg).filter(_.nonEmpty))
+          case None => onSuccess(testSource, reporters, logger)
+        }
+      }
 
-    def testFailed(testSource: TestSource, reporters: Seq[TestReporter]): Option[String] =
-      Option(reporters.exists(reporterFailed)).filter(identity).map(_ => s"Compilation failed for: '${testSource.title}'")
+    /**
+     * Based on the reporters obtained after the compilation, determines if this test has failed.
+     * If it has, returns a Some with an error message. Otherwise, returns None.
+     * As the conditions of failure are different for different test types, this method should be
+     * overridden by the concrete implementations of this trait.
+     */
+    def maybeFailureMessage(testSource: TestSource, reporters: Seq[TestReporter]): Option[String] =
+      if (reporters.exists(reporterFailed)) Some(s"Compilation failed for: '${testSource.title}'")
+      else None
 
+    /**
+     * If the test has compiled successfully, this callback will be called. You can still fail the test from this callback.
+     */
     def onSuccess(testSource: TestSource, reporters: Seq[TestReporter], logger: LoggedRunnable): Unit = ()
+
+    /**
+     * If the test failed to compile or the compiler crashed, this callback will be called.
+     */
     def onFailure(testSource: TestSource, reporters: Seq[TestReporter], logger: LoggedRunnable, message: Option[String]): Unit = {
       message.foreach(echo)
       reporters.filter(reporterFailed).foreach(logger.logReporterContents)
@@ -329,11 +359,6 @@ trait ParallelTesting extends RunnerOrchestration { self =>
       val (errCount, warnCount) = countErrorsAndWarnings(reporters)
       val errorMsg = testSource.buildInstructions(errCount, warnCount)
       addFailureInstruction(errorMsg)
-    }
-    protected def logBuildInstructions(reporter: TestReporter, testSource: TestSource, err: Int, war: Int) = {
-      val errorMsg = testSource.buildInstructions(reporter.errorCount, reporter.warningCount)
-      addFailureInstruction(errorMsg)
-      failTestSource(testSource)
     }
 
     /** Instructions on how to reproduce failed test source compilations */
@@ -628,10 +653,12 @@ trait ParallelTesting extends RunnerOrchestration { self =>
 
     private[this] def verifyOutput(checkFile: Option[JFile], dir: JFile, testSource: TestSource, warnings: Int) = {
       if (Properties.testsNoRun) addNoRunWarning()
-      else runMain(testSource.runClassPath) match {
-        case Success(_) if !checkFile.isDefined || !checkFile.get.exists =>
-        case Success(output) => checkFile.foreach(diffTest(testSource, _, output.linesIterator.toList))
-        case Failure(output) =>
+      else runMain(testSource.runClassPath) match {        
+        case Success(output) => checkFile match {
+          case Some(file) if file.exists => diffTest(testSource, file, output.linesIterator.toList)
+          case _ =>
+        }
+        case Failure(output) => 
           echo(s"Test '${testSource.title}' failed with output:")
           echo(output)
           failTestSource(testSource)
@@ -647,20 +674,20 @@ trait ParallelTesting extends RunnerOrchestration { self =>
 
   private final class NegTest(testSources: List[TestSource], times: Int, threadLimit: Option[Int], suppressAllOutput: Boolean)(implicit summaryReport: SummaryReporting)
   extends Test(testSources, times, threadLimit, suppressAllOutput) {
-    override val suppressErrors = true
+    override def suppressErrors = true
 
-    override def testFailed(testSource: TestSource, reporters: Seq[TestReporter]): Option[String] = {
-      val compilerCrashed            = reporters.exists(_.compilerCrashed)
-      val (errorMap, expectedErrors) = getErrorMapAndExpectedCount(testSource.sourceFiles)
-      val actualErrors               = reporters.foldLeft(0)(_ + _.errorCount)
-      val hasMissingAnnotations      = getMissingExpectedErrors(errorMap, reporters.iterator.flatMap(_.errors))
+    override def maybeFailureMessage(testSource: TestSource, reporters: Seq[TestReporter]): Option[String] = {
+      def compilerCrashed = reporters.exists(_.compilerCrashed)
+      lazy val (errorMap, expectedErrors) = getErrorMapAndExpectedCount(testSource.sourceFiles)
+      lazy val actualErrors = reporters.foldLeft(0)(_ + _.errorCount)
+      def hasMissingAnnotations = getMissingExpectedErrors(errorMap, reporters.iterator.flatMap(_.errors))
 
-           if (compilerCrashed               ) Some(s"Compiler crashed when compiling: ${testSource.title}"                                                             )
-      else if (actualErrors   == 0           ) Some(s"\nNo errors found when compiling neg test $testSource"                                                            )
+      if (compilerCrashed) Some(s"Compiler crashed when compiling: ${testSource.title}"                                                             )
+      else if (actualErrors == 0) Some(s"\nNo errors found when compiling neg test $testSource"                                                            )
       else if (expectedErrors != actualErrors) Some(s"\nWrong number of errors encountered when compiling $testSource, expected: $expectedErrors, actual: $actualErrors")
-      else if (hasMissingAnnotations         ) Some(s"\nErrors found on incorrect row numbers when compiling $testSource"                                               )
-      else if (!errorMap.isEmpty             ) Some(s"\nExpected error(s) have {<error position>=<unreported error>}: $errorMap"                                        )
-      else                                     None
+      else if (hasMissingAnnotations) Some(s"\nErrors found on incorrect row numbers when compiling $testSource"                                               )
+      else if (!errorMap.isEmpty) Some(s"\nExpected error(s) have {<error position>=<unreported error>}: $errorMap"                                        )
+      else None
     }
 
     override def onSuccess(testSource: TestSource, reporters: Seq[TestReporter], logger: LoggedRunnable): Unit =
@@ -722,8 +749,8 @@ trait ParallelTesting extends RunnerOrchestration { self =>
 
   private final class NoCrashTest(testSources: List[TestSource], times: Int, threadLimit: Option[Int], suppressAllOutput: Boolean)(implicit summaryReport: SummaryReporting)
   extends Test(testSources, times, threadLimit, suppressAllOutput) {
-    override val suppressErrors = true
-    override def testFailed(testSource: TestSource, reporters: Seq[TestReporter]): Option[String] = None
+    override def suppressErrors = true
+    override def maybeFailureMessage(testSource: TestSource, reporters: Seq[TestReporter]): Option[String] = None
   }
 
   def diffMessage(sourceTitle: String, outputLines: Seq[String], checkLines: Seq[String]): Option[String] = {

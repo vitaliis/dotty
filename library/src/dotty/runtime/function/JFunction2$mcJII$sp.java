@@ -6,7 +6,7 @@
 package dotty.runtime.function;
 
 @FunctionalInterface
-public interface JFunction2$mcJII$sp extends JFunction2<Object, Object, Object> {
+public interface JFunction2$mcJII$sp extends JFunction2 {
     abstract long apply$mcJII$sp(int v1, int v2);
 
     default Object apply(Object v1, Object v2) { return (Long) apply$mcJII$sp(scala.runtime.BoxesRunTime.unboxToInt(v1), scala.runtime.BoxesRunTime.unboxToInt(v2)); }

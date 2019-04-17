@@ -6,7 +6,7 @@
 package dotty.runtime.function;
 
 @FunctionalInterface
-public interface JFunction1$mcVD$sp extends JFunction1<Object, Object> {
+public interface JFunction1$mcVD$sp extends JFunction1 {
     abstract void apply$mcVD$sp(double v1);
 
     default Object apply(Object t) { apply$mcVD$sp(scala.runtime.BoxesRunTime.unboxToDouble(t)); return scala.runtime.BoxedUnit.UNIT; }

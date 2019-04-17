@@ -182,7 +182,6 @@ class CompilationTests extends ParallelTesting {
     compileFile("tests/neg-custom-args/i3882.scala", allowDeepSubtypes) +
     compileFile("tests/neg-custom-args/i4372.scala", allowDeepSubtypes) +
     compileFile("tests/neg-custom-args/i1754.scala", allowDeepSubtypes) +
-    compileFile("tests/neg-custom-args/conditionalWarnings.scala", allowDeepSubtypes.and("-deprecation").and("-Xfatal-warnings")) +
     compileFilesInDir("tests/neg-custom-args/isInstanceOf", allowDeepSubtypes and "-Xfatal-warnings") +
     compileFile("tests/neg-custom-args/i3627.scala", allowDeepSubtypes) +
     compileFile("tests/neg-custom-args/matchtype-loop.scala", allowDeepSubtypes) +
@@ -191,8 +190,7 @@ class CompilationTests extends ParallelTesting {
     compileList("duplicate source", List(
       "tests/neg-custom-args/toplevel-samesource/S.scala",
       "tests/neg-custom-args/toplevel-samesource/nested/S.scala"),
-      defaultOptions) +
-    compileFile("tests/neg-custom-args/i6300.scala", allowDeepSubtypes)
+      defaultOptions)
   }.checkExpectedErrors()
 
   @Test def fuzzyAll: Unit = {
@@ -253,7 +251,7 @@ class CompilationTests extends ParallelTesting {
       Array("-Ycheck-reentrant", "-Yemit-tasty-in-class")
     )
 
-    val libraryDirs = List(Paths.get("library/src"), Paths.get("library/src-3.x"), Paths.get("library/src-bootstrapped"))
+    val libraryDirs = List(Paths.get("library/src"), Paths.get("library/src-bootstrapped"))
     val librarySources = libraryDirs.flatMap(sources(_))
 
     val lib =

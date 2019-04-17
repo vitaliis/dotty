@@ -1,5 +1,4 @@
-package dotty
-package tools
+package dotty.tools
 package repl
 
 import java.io.{File => JFile}
@@ -7,7 +6,6 @@ import java.lang.System.{lineSeparator => EOL}
 
 import org.junit.Assert._
 import org.junit.Test
-import org.junit.experimental.categories.Category
 
 import scala.collection.mutable.ArrayBuffer
 import scala.io.Source
@@ -93,7 +91,4 @@ class ScriptedTests extends ReplTest with MessageRendering {
   @Test def replTests = scripts("/repl").foreach(testFile)
 
   @Test def typePrinterTests = scripts("/type-printer").foreach(testFile)
-
-  @Category(Array(classOf[BootstrappedOnlyTests]))
-  @Test def replMacrosTests = scripts("/repl-macros").foreach(testFile)
 }
