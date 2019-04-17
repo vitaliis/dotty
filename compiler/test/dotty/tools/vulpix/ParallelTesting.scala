@@ -180,6 +180,72 @@ trait ParallelTesting extends RunnerOrchestration { self =>
       .toList.sortBy(_._1).map(_._2.filter(isSourceFile).sorted)
   }
 
+  trait CompilationLogic {
+    def verifyOutput(files: List[JFile]) = {
+      checkFile(files, "decompiled") match {
+        case Some(checkFile) =>
+          val ignoredFilePathLine = "/** Decompiled from"
+          val stripTrailingWhitespaces = "(.*\\S|)\\s+".r
+          val output = Source.fromFile(outDir.getParent + "_decompiled" + JFile.separator + outDir.getName
+            + JFile.separator + "decompiled.scala", "UTF-8").getLines().map {line =>
+            stripTrailingWhitespaces.unapplySeq(line).map(_.head).getOrElse(line)
+          }.filter(!_.startsWith(ignoredFilePathLine)).toList
+
+          val check: String = Source.fromFile(checkFile, "UTF-8").getLines()
+            .mkString(EOL)
+
+          if (output.mkString(EOL) != check) {
+
+            dumpOutputToFile(checkFile, output)
+
+            // Print build instructions to file and summary:
+            val buildInstr = testSource.buildInstructions(0, rep.warningCount)
+            addFailureInstruction(buildInstr)
+
+            // Fail target:
+            failTestSource(testSource)
+          }
+        case _ =>
+      }
+    }
+
+    def checkFile(files: List[JFile], extension: String): Option[JFile] = files.flatMap { file =>
+      if (file.isDirectory) Nil
+      else {
+        val fname = file.getAbsolutePath.reverse.dropWhile(_ != '.').reverse + extension
+        val checkFile = new JFile(fname)
+        if (checkFile.exists) List(checkFile)
+        else Nil
+      }
+    }.headOption
+
+    /** @return (compilerCrashed, errorCount, warningCount, reporter) */
+    def compileTestSource(testSource: TestSource): List[Reporter] =
+      testSource match {
+        case testSource @ JointCompilationSource(name, files, flags, outDir, fromTasty, decompilation) =>
+          val reporter =
+                 if (decompilation) { decompile       (flags, false, outDir) ; verifyOutput(files) }
+            else if (fromTasty    )   compileFromTasty(flags, false, outDir)
+            else compile(testSource.sourceFiles,       flags, false, outDir)
+          List(reporter)
+
+        case testSource @ SeparateCompilationSource(_, dir, flags, outDir) =>
+          testSource.compilationGroups.map(files => compile(files, flags, false, outDir))  // TODO? only `compile` option?
+      }
+
+    protected def encapsulatedCompilation(testSource: TestSource) = new LoggedRunnable {
+      def checkTestSource(): Unit = tryCompile(testSource) {
+        registerCompletion()
+        compileTestSource(testSource)
+          .filter(r => r.compilerCrashed || r.errorCount > 0)
+          .foreach { r =>
+            logReporterContents(r)
+            logBuildInstructions(r, testSource, r.errorCount, r.warningCount)
+          }
+      }
+    }
+  }
+
   /** Each `Test` takes the `testSources` and performs the compilation and assertions
    *  according to the implementing class "neg", "run" or "pos".
    */
@@ -213,7 +279,6 @@ trait ParallelTesting extends RunnerOrchestration { self =>
         summaryReport.echoToLog(logBuffer.iterator)
       }
     }
-
     /** Actual compilation run logic, the test behaviour is defined here */
     protected def encapsulatedCompilation(testSource: TestSource): LoggedRunnable
 
