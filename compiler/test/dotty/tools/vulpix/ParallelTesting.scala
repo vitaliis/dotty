@@ -196,13 +196,13 @@ trait ParallelTesting extends RunnerOrchestration { self =>
 
     protected def encapsulatedCompilation(testSource: TestSource) = new LoggedRunnable {
       def checkTestSource(): Unit = tryCompile(testSource) {
-        registerCompletion()
         compileTestSource(testSource)
           .filter(r => r.compilerCrashed || r.errorCount > 0)
           .foreach { r =>
             logReporterContents(r)
             logBuildInstructions(r, testSource, r.errorCount, r.warningCount)
           }
+        registerCompletion()
       }
     }
   }
