@@ -181,7 +181,6 @@ trait ParallelTesting extends RunnerOrchestration { self =>
   }
 
   private trait CompilationLogic { this: Test =>
-    /** @return (compilerCrashed, errorCount, warningCount, reporter) */
     def compileTestSource(testSource: TestSource): List[TestReporter] =
       testSource match {
         case testSource @ JointCompilationSource(name, files, flags, outDir, fromTasty, decompilation) =>
@@ -194,14 +193,19 @@ trait ParallelTesting extends RunnerOrchestration { self =>
           testSource.compilationGroups.map(files => compile(files, flags, false, outDir))  // TODO? only `compile` option?
       }
 
+    def verifyOutput(testSource: TestSource, warnings: Int): Unit = ()
+
     protected def encapsulatedCompilation(testSource: TestSource) = new LoggedRunnable {
       def checkTestSource(): Unit = tryCompile(testSource) {
         val failed = compileTestSource(testSource).filter(r => r.compilerCrashed || r.errorCount > 0)
-        if (failed.isEmpty) println("All good")//verifier()
+        val (errCount, warnCount) = failed.foldLeft((0, 0)) { case ((err, warn), r) =>
+          (err + r.errorCount, warn + r.warningCount) }
+
+        if (failed.isEmpty) verifyOutput(testSource, warnCount)
         else {
           echo(s"    Compilation failed for: '${testSource.title}'                               ")
           failed.foreach(logReporterContents)
-          logBuildInstructions(testSource, failed)
+          logBuildInstructions(testSource, errCount, warnCount)
         }
         registerCompletion()
       }
@@ -284,10 +288,8 @@ trait ParallelTesting extends RunnerOrchestration { self =>
     /** Number of failed tests */
     def failureCount: Int = _failureCount
 
-    protected def logBuildInstructions(testSource: TestSource, reporters: Seq[TestReporter]) = {
-      val (errCount, warCount) = reporters.foldLeft((0, 0)) { case ((err, war), r) =>
-        (err + r.errorCount, war + r.warningCount) }
-      val errorMsg = testSource.buildInstructions(errCount, warCount)
+    protected def logBuildInstructions(testSource: TestSource, errCount: Int, warnCount: Int) = {
+      val errorMsg = testSource.buildInstructions(errCount, warnCount)
       addFailureInstruction(errorMsg)
       failTestSource(testSource)
     }
@@ -642,7 +644,7 @@ trait ParallelTesting extends RunnerOrchestration { self =>
 
             if (reporter.compilerCrashed || reporter.errorCount > 0) {
               logReporterContents(reporter)
-              logBuildInstructions(testSource, List(reporter))
+              logBuildInstructions(testSource, reporter.errorCount, reporter.warningCount)
             }
 
             (reporter.compilerCrashed, reporter.errorCount, reporter.warningCount, () => verifyOutput(checkFile, outDir, testSource, reporter.warningCount))
