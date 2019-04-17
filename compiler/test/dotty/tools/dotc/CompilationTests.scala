@@ -37,6 +37,11 @@ class CompilationTests extends ParallelTesting {
     compileList("compileStdLib", TestSources.stdLibSources, scala2Mode.and("-migration", "-Yno-inline"))
   }.checkCompile()
 
+  @Test def example: Unit = {
+    implicit val testGroup: TestGroup = TestGroup("example")
+    compileFilesInDir("tests/playground", defaultOptions).checkCompile()
+  }
+
   @Test def pos: Unit = {
     implicit val testGroup: TestGroup = TestGroup("compilePos")
     compileList("compileStdLib", TestSources.stdLibSources, scala2Mode.and("-migration", "-Yno-inline")) +
