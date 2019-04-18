@@ -234,7 +234,7 @@ trait ParallelTesting extends RunnerOrchestration { self =>
         (msg => onFailure(testSource, reporters, logger, Option(msg).filter(_.nonEmpty)) ) )
 
     def testFailed(testSource: TestSource, reporters: Seq[TestReporter]): Option[String] =
-      Option(reporters.exists(reporterFailed)).map(_ => s"Compilation failed for: '${testSource.title}'")
+      Option(reporters.exists(reporterFailed)).filter(identity).map(_ => s"Compilation failed for: '${testSource.title}'")
 
     def onSuccess(testSource: TestSource, reporters: Seq[TestReporter], logger: LoggedRunnable): Unit = ()
     def onFailure(testSource: TestSource, reporters: Seq[TestReporter], logger: LoggedRunnable, message: Option[String]): Unit = {
