@@ -200,6 +200,22 @@ trait ParallelTesting extends RunnerOrchestration { self =>
     final def countWarnings(reporters: Seq[TestReporter]) = countErrorsAndWarnings(reporters)._2
     final def reporterFailed(r: TestReporter) = r.compilerCrashed || r.errorCount > 0
 
+    final def checkFile(testSource: TestSource): Option[JFile] = (testSource match {
+      case ts: JointCompilationSource =>
+        ts.files.filter(f => !f.isDirectory).map { f => new JFile(f.getAbsolutePath.replaceFirst("\\.scala$", ".check")) }.headOption
+
+      case ts: SeparateCompilationSource =>
+        Option(new JFile(dir.getAbsolutePath + ".check"))
+    }).filter(_.exists)
+
+    final def diffTest(sourceName: String, checkFile: JFile, actual: List[String]) = {
+      val expected = Source.fromFile(checkFile, "UTF-8").getLines().toList
+      for (msg <- diffMessage(sourceName, actual, expected)) {
+        fail(msg)
+        dumpOutputToFile(checkFile, actual)
+      }
+    }
+
     final def encapsulatedCompilation(testSource: TestSource) = new LoggedRunnable { self =>
       def checkTestSource(): Unit = tryCompile(testSource) {
         val reporters = compileTestSource(testSource)
@@ -606,46 +622,16 @@ trait ParallelTesting extends RunnerOrchestration { self =>
       if (Properties.testsNoRun) addNoRunWarning()
       else runMain(testSource.runClassPath) match {
         case Success(_) if !checkFile.isDefined || !checkFile.get.exists => // success!
-        case Success(output) => {
-          val outputLines = output.linesIterator.toSeq
-          val checkLines: Seq[String] = Source.fromFile(checkFile.get, "UTF-8").getLines().toSeq
-          val sourceTitle = testSource.title
-
-          diffMessage(sourceTitle, outputLines, checkLines).foreach { msg =>
-
-            echo(msg)
-            addFailureInstruction(msg)
-
-            // Print build instructions to file and summary:
-            val buildInstr = testSource.buildInstructions(0, warnings)
-            addFailureInstruction(buildInstr)
-
-            // Fail target:
-            failTestSource(testSource)
-
-            dumpOutputToFile(checkFile.get, outputLines)
-          }
-        }
-
+        case Success(output) => checkFile.foreach(diffTest(testSource, _, output.linesIterator.toSeq))
         case Failure(output) =>
           echo(s"Test '${testSource.title}' failed with output:")
           echo(output)
           failTestSource(testSource)
-
         case Timeout =>
           echo("failed because test " + testSource.title + " timed out")
           failTestSource(testSource, TimeoutFailure(testSource.title))
       }
     }
-
-    def checkFile(testSource: TestSource): Option[JFile] = testSource match {
-      case ts: JointCompilationSource => ts.files.filter(f => !f.isDirectory).flatMap { file =>
-        Option(new JFile(file.getAbsolutePath.reverse.dropWhile(_ != '.').reverse + "check")).filter(_.exists) }.headOption
-
-      case ts: SeparateCompilationSource =>
-        Option(new JFile(ts.dir.getAbsolutePath.reverse.dropWhile(_ == JFile.separatorChar).reverse + ".check")).filter(_.exists)
-    }
-
 
     override def onSuccess(testSource: TestSource, reporters: Seq[TestReporter], logger: LoggedRunnable) =
       verifyOutput(checkFile(testSource), testSource.outDir, testSource, countWarnings(reporters))
@@ -666,16 +652,60 @@ trait ParallelTesting extends RunnerOrchestration { self =>
       else                                     None
     }
 
-    def files: List[JFile] = testSource match {
-      case ts: JointCompilationSource =>
-        files.filter(f => !f.isDirectory).map { f =>
-          new JFile(f.getAbsolutePath.replaceFirst("\\.scala$", ".check")) }
+    override def onSuccess(testSource: TestSource, reporters: Seq[TestReporter], logger: LoggedRunnable): Unit =
+      checkFile(testSource).foreach(diffTest(testSource.title, _, reporterOutputLines(reporters)))
 
-      case ts: SeparateCompilationSource =>
+    def reporterOutputLines(reporters: List[TestReporter]): List[String] =
+      reporters.flatMap(_.allErrors).sortBy(_.pos.source.toString).flatMap { error =>
+        (error.pos.span.toString + " in " + error.pos.source.file.name) :: error.getMessage().linesIterator.toList }
+
+    // In neg-tests we allow two types of error annotations,
+    // "nopos-error" which doesn't care about position and "error" which
+    // has to be annotated on the correct line number.
+    //
+    // We collect these in a map `"file:row" -> numberOfErrors`, for
+    // nopos errors we save them in `"file" -> numberOfNoPosErrors`
+    def getErrorMapAndExpectedCount(files: Array[JFile]): (HashMap[String, Integer], Int) = {
+      val errorMap = new HashMap[String, Integer]()
+      var expectedErrors = 0
+      files.filter(_.getName.endsWith(".scala")).foreach { file =>
+        Source.fromFile(file, "UTF-8").getLines().zipWithIndex.foreach { case (line, lineNbr) =>
+          val errors = line.sliding("// error".length).count(_.mkString == "// error")
+          if (errors > 0)
+            errorMap.put(s"${file.getAbsolutePath}:${lineNbr}", errors)
+
+          val noposErrors = line.sliding("// nopos-error".length).count(_.mkString == "// nopos-error")
+          if (noposErrors > 0) {
+            val nopos = errorMap.get("nopos")
+            val existing: Integer = if (nopos eq null) 0 else nopos
+            errorMap.put("nopos", noposErrors + existing)
+          }
+
+          expectedErrors += noposErrors + errors
+        }
+      }
+
+      (errorMap, expectedErrors)
     }
 
-    override def onSuccess(testSource: TestSource, reporters: Seq[TestReporter], logger: LoggedRunnable): Unit = {
+    def getMissingExpectedErrors(errorMap: HashMap[String, Integer], reporterErrors: Iterator[MessageContainer]) = !reporterErrors.forall { error =>
+      val key = if (error.pos.exists) {
+        val fileName = error.pos.source.file.toString
+        s"$fileName:${error.pos.line}"
 
+      } else "nopos"
+
+      val errors = errorMap.get(key)
+
+      if (errors ne null) {
+        if (errors == 1) errorMap.remove(key)
+        else errorMap.put(key, errors - 1)
+        true
+      }
+      else {
+        echo(s"Error reported in ${error.pos.source}, but no annotation found")
+        false
+      }
     }
   }
 
