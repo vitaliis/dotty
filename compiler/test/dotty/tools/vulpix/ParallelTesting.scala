@@ -181,7 +181,7 @@ trait ParallelTesting extends RunnerOrchestration { self =>
   }
 
   private trait CompilationLogic { this: Test =>
-    def compileTestSource(testSource: TestSource): List[TestReporter] =
+    final def compileTestSource(testSource: TestSource): List[TestReporter] =
       testSource match {
         case testSource @ JointCompilationSource(name, files, flags, outDir, fromTasty, decompilation) =>
           val reporter =
@@ -193,26 +193,35 @@ trait ParallelTesting extends RunnerOrchestration { self =>
           testSource.compilationGroups.map(files => compile(files, flags, false, outDir))  // TODO? only `compile` option?
       }
 
-    def onSuccess(testSource: TestSource, reporters: Seq[TestReporter], logger: LoggedRunnable): Unit = ()
-    def onFailure(testSource: TestSource, reporters: Seq[TestReporter], logger: LoggedRunnable): Unit = {
-      echo(s"    Compilation failed for: '${testSource.title}'                               ")
-      reporters.filter(reporterFailed).foreach(logger.logReporterContents)
-      logBuildInstructions(testSource, reporters)
-    }
-
-    def countErrorsAndWarnings(reporters: Seq[TestReporter]): (Int, Int) =
+    final def countErrorsAndWarnings(reporters: Seq[TestReporter]): (Int, Int) =
       reporters.foldLeft((0, 0)) { case ((err, warn), r) => (err + r.errorCount, warn + r.warningCount) }
 
-    def countErrors  (reporters: Seq[TestReporter]) = countErrorsAndWarnings(reporters)._1
-    def countWarnings(reporters: Seq[TestReporter]) = countErrorsAndWarnings(reporters)._2
-    def reporterFailed(r: TestReporter) = r.compilerCrashed || r.errorCount > 0
+    final def countErrors  (reporters: Seq[TestReporter]) = countErrorsAndWarnings(reporters)._1
+    final def countWarnings(reporters: Seq[TestReporter]) = countErrorsAndWarnings(reporters)._2
+    final def reporterFailed(r: TestReporter) = r.compilerCrashed || r.errorCount > 0
 
-    protected def encapsulatedCompilation(testSource: TestSource) = new LoggedRunnable { self =>
+    final def encapsulatedCompilation(testSource: TestSource) = new LoggedRunnable { self =>
       def checkTestSource(): Unit = tryCompile(testSource) {
         val reporters = compileTestSource(testSource)
-        if (!reporters.exists(reporterFailed)) onSuccess(testSource, reporters, self)
-        else                                   onFailure(testSource, reporters, self)
+        onComplete(testSource, reporters, self)
+        registerCompletion()
       }
+    }
+
+    final def onComplete(testSource: TestSource, reporters: Seq[TestReporter], logger: LoggedRunnable): Unit =
+      testFailed(testSource, reporters).fold(
+               onSuccess(testSource, reporters, logger                                )
+      , msg => onFailure(testSource, reporters, logger, Option(msg).filter(_.nonEmpty)) )
+
+    def testFailed(testSource: TestSource, reporters: Seq[TestReporter]): Option[String] =
+      Option(reporters.exists(reporterFailed)).map(_ => s"Compilation failed for: '${testSource.title}'")
+
+    def onSuccess(testSource: TestSource, reporters: Seq[TestReporter], logger: LoggedRunnable): Unit = ()
+    def onFailure(testSource: TestSource, reporters: Seq[TestReporter], logger: LoggedRunnable, message: Option[String]): Unit = {
+      message.foreach(echo)
+      reporters.filter(reporterFailed).foreach(logger.logReporterContents)
+      logBuildInstructions(testSource, reporters)
+      failTestSource(testSource)
     }
   }
 
@@ -296,7 +305,6 @@ trait ParallelTesting extends RunnerOrchestration { self =>
       val (errCount, warnCount) = countErrorsAndWarnings(reporters)
       val errorMsg = testSource.buildInstructions(errCount, warnCount)
       addFailureInstruction(errorMsg)
-      failTestSource(testSource)
     }
     protected def logBuildInstructions(reporter: TestReporter, testSource: TestSource, err: Int, war: Int) = {
       val errorMsg = testSource.buildInstructions(reporter.errorCount, reporter.warningCount)
@@ -645,126 +653,29 @@ trait ParallelTesting extends RunnerOrchestration { self =>
 
   private final class NegTest(testSources: List[TestSource], times: Int, threadLimit: Option[Int], suppressAllOutput: Boolean)(implicit summaryReport: SummaryReporting)
   extends Test(testSources, times, threadLimit, suppressAllOutput) {
-    override protected def encapsulatedCompilation(testSource: TestSource) = new LoggedRunnable {
-      def checkTestSource(): Unit = tryCompile(testSource) {
-        // In neg-tests we allow two types of error annotations,
-        // "nopos-error" which doesn't care about position and "error" which
-        // has to be annotated on the correct line number.
-        //
-        // We collect these in a map `"file:row" -> numberOfErrors`, for
-        // nopos errors we save them in `"file" -> numberOfNoPosErrors`
-        def getErrorMapAndExpectedCount(files: Array[JFile]): (HashMap[String, Integer], Int) = {
-          val errorMap = new HashMap[String, Integer]()
-          var expectedErrors = 0
-          files.filter(_.getName.endsWith(".scala")).foreach { file =>
-            Source.fromFile(file, "UTF-8").getLines().zipWithIndex.foreach { case (line, lineNbr) =>
-              val errors = line.sliding("// error".length).count(_.mkString == "// error")
-              if (errors > 0)
-                errorMap.put(s"${file.getAbsolutePath}:${lineNbr}", errors)
+    override def testFailed(reporters: Seq[TestReporter]): Option[() => Unit] = {
+      val compilerCrashed            = reporters.exists(_.compilerCrashed)
+      val (errorMap, expectedErrors) = getErrorMapAndExpectedCount(testSource.sourceFiles)
+      val actualErrors               = reporters.foldLeft(0)(_ + _.errorCount)
 
-              val noposErrors = line.sliding("// nopos-error".length).count(_.mkString == "// nopos-error")
-              if (noposErrors > 0) {
-                val nopos = errorMap.get("nopos")
-                val existing: Integer = if (nopos eq null) 0 else nopos
-                errorMap.put("nopos", noposErrors + existing)
-              }
+           if (compilerCrashed               ) Some(s"Compiler crashed when compiling: ${testSource.title}"                                                             )
+      else if (actualErrors   == 0           ) Some(s"\nNo errors found when compiling neg test $testSource"                                                            )
+      else if (expectedErrors != actualErrors) Some(s"\nWrong number of errors encountered when compiling $testSource, expected: $expectedErrors, actual: $actualErrors")
+      else if (hasMissingAnnotations()       ) Some(s"\nErrors found on incorrect row numbers when compiling $testSource"                                               )
+      else if (!errorMap.isEmpty             ) Some(s"\nExpected error(s) have {<error position>=<unreported error>}: $errorMap"                                        )
+      else                                     None
+    }
 
-              expectedErrors += noposErrors + errors
-            }
-          }
+    def files: List[JFile] = testSource match {
+      case ts: JointCompilationSource =>
+        files.filter(f => !f.isDirectory).map { f =>
+          new JFile(f.getAbsolutePath.replaceFirst("\\.scala$", ".check")) }
 
-          (errorMap, expectedErrors)
-        }
+      case ts: SeparateCompilationSource =>
+    }
 
-        def getMissingExpectedErrors(errorMap: HashMap[String, Integer], reporterErrors: Iterator[MessageContainer]) = !reporterErrors.forall { error =>
-          val key = if (error.pos.exists) {
-            val fileName = error.pos.source.file.toString
-            s"$fileName:${error.pos.line}"
+    override def onSuccess(testSource: TestSource, reporters: Seq[TestReporter], logger: LoggedRunnable): Unit = {
 
-          } else "nopos"
-
-          val errors = errorMap.get(key)
-
-          if (errors ne null) {
-            if (errors == 1) errorMap.remove(key)
-            else errorMap.put(key, errors - 1)
-            true
-          }
-          else {
-            echo(s"Error reported in ${error.pos.source}, but no annotation found")
-            false
-          }
-        }
-
-        def fail(msg: String): Unit = {
-          echo(msg)
-          failTestSource(testSource)
-        }
-
-        def reporterOutputLines(reporters: List[TestReporter]): List[String] = {
-          reporters.flatMap(_.allErrors).sortBy(_.pos.source.toString).flatMap { error =>
-            (error.pos.span.toString + " in " + error.pos.source.file.name) :: error.getMessage().linesIterator.toList
-          }
-        }
-        def checkFileTest(sourceName: String, checkFile: JFile, actual: List[String]) = {
-          val expexted = Source.fromFile(checkFile, "UTF-8").getLines().toList
-          for (msg <- diffMessage(sourceName, actual, expexted)) {
-            fail(msg)
-            dumpOutputToFile(checkFile, actual)
-          }
-        }
-
-        val (compilerCrashed, expectedErrors, actualErrors, hasMissingAnnotations, errorMap) = testSource match {
-          case testSource @ JointCompilationSource(_, files, flags, outDir, fromTasty, decompilation) =>
-            val sourceFiles = testSource.sourceFiles
-            val (errorMap, expectedErrors) = getErrorMapAndExpectedCount(sourceFiles)
-            val reporter = compile(sourceFiles, flags, true, outDir)
-            val actualErrors = reporter.errorCount
-            files.foreach { file =>
-              if (!file.isDirectory) {
-                val checkFile = new JFile(file.getAbsolutePath.replaceFirst("\\.scala$", ".check"))
-                if (checkFile.exists)
-                  checkFileTest(testSource.title, checkFile, reporterOutputLines(reporter :: Nil))
-              }
-            }
-            if (reporter.compilerCrashed || actualErrors > 0)
-              logReporterContents(reporter)
-
-            (reporter.compilerCrashed, expectedErrors, actualErrors, () => getMissingExpectedErrors(errorMap, reporter.errors), errorMap)
-
-          case testSource @ SeparateCompilationSource(_, dir, flags, outDir) => {
-            val compilationGroups = testSource.compilationGroups
-            val (errorMap, expectedErrors) = getErrorMapAndExpectedCount(compilationGroups.toArray.flatten)
-            val reporters = compilationGroups.map(compile(_, flags, true, outDir))
-            val compilerCrashed = reporters.exists(_.compilerCrashed)
-            val actualErrors = reporters.foldLeft(0)(_ + _.errorCount)
-            val errors = reporters.iterator.flatMap(_.errors)
-
-            if (actualErrors > 0)
-              reporters.foreach(logReporterContents)
-
-            val checkFile = new JFile(dir.getAbsolutePath + ".check")
-            if (checkFile.exists)
-              checkFileTest(testSource.title, checkFile, reporterOutputLines(reporters))
-
-            (compilerCrashed, expectedErrors, actualErrors, () => getMissingExpectedErrors(errorMap, errors), errorMap)
-          }
-        }
-
-
-        if (compilerCrashed)
-          fail(s"Compiler crashed when compiling: ${testSource.title}")
-        else if (actualErrors == 0)
-          fail(s"\nNo errors found when compiling neg test $testSource")
-        else if (expectedErrors != actualErrors)
-          fail(s"\nWrong number of errors encountered when compiling $testSource, expected: $expectedErrors, actual: $actualErrors")
-        else if (hasMissingAnnotations())
-          fail(s"\nErrors found on incorrect row numbers when compiling $testSource")
-        else if (!errorMap.isEmpty)
-          fail(s"\nExpected error(s) have {<error position>=<unreported error>}: $errorMap")
-
-        registerCompletion()
-      }
     }
   }
 
