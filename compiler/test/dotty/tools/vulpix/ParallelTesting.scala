@@ -184,16 +184,18 @@ trait ParallelTesting extends RunnerOrchestration { self =>
   }
 
   private trait CompilationLogic { this: Test =>
+    val suppressErrors = false
+
     final def compileTestSource(testSource: TestSource): List[TestReporter] =
       testSource match {
         case testSource @ JointCompilationSource(name, files, flags, outDir, fromTasty, decompilation) =>
           val reporter =
-            if (fromTasty) compileFromTasty(               flags, false, outDir)
-            else           compile(testSource.sourceFiles, flags, false, outDir)
+            if (fromTasty) compileFromTasty(               flags, suppressErrors, outDir)
+            else           compile(testSource.sourceFiles, flags, suppressErrors, outDir)
           List(reporter)
 
         case testSource @ SeparateCompilationSource(_, dir, flags, outDir) =>
-          testSource.compilationGroups.map(files => compile(files, flags, false, outDir))  // TODO? only `compile` option?
+          testSource.compilationGroups.map(files => compile(files, flags, suppressErrors, outDir))  // TODO? only `compile` option?
       }
 
     final def countErrorsAndWarnings(reporters: Seq[TestReporter]): (Int, Int) =
@@ -643,6 +645,8 @@ trait ParallelTesting extends RunnerOrchestration { self =>
 
   private final class NegTest(testSources: List[TestSource], times: Int, threadLimit: Option[Int], suppressAllOutput: Boolean)(implicit summaryReport: SummaryReporting)
   extends Test(testSources, times, threadLimit, suppressAllOutput) {
+    override val suppressErrors = true
+    
     override def testFailed(testSource: TestSource, reporters: Seq[TestReporter]): Option[String] = {
       val compilerCrashed            = reporters.exists(_.compilerCrashed)
       val (errorMap, expectedErrors) = getErrorMapAndExpectedCount(testSource.sourceFiles)
