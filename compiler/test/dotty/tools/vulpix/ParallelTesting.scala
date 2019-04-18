@@ -56,6 +56,7 @@ trait ParallelTesting extends RunnerOrchestration { self =>
     def name: String
     def outDir: JFile
     def flags: TestFlags
+    def sourceFiles: Array[JFile]
 
     def runClassPath: String = outDir.getAbsolutePath + JFile.pathSeparator + flags.runClassPath
 
@@ -141,7 +142,7 @@ trait ParallelTesting extends RunnerOrchestration { self =>
     fromTasty: Boolean = false,
     decompilation: Boolean = false
   ) extends TestSource {
-    def sourceFiles: Array[JFile] = files.filter(isSourceFile)
+    def sourceFiles: Array[JFile] = files.filter(isSourceFile).toArray
 
     override def toString() = outDir.toString
   }
@@ -178,6 +179,8 @@ trait ParallelTesting extends RunnerOrchestration { self =>
         .getOrElse("")
       }
       .toList.sortBy(_._1).map(_._2.filter(isSourceFile).sorted)
+
+    def sourceFiles: Array[JFile] = compilationGroups.flatten.filter(isSourceFile).toArray
   }
 
   private trait CompilationLogic { this: Test =>
@@ -205,18 +208,19 @@ trait ParallelTesting extends RunnerOrchestration { self =>
         ts.files.filter(f => !f.isDirectory).map { f => new JFile(f.getAbsolutePath.replaceFirst("\\.scala$", ".check")) }.headOption
 
       case ts: SeparateCompilationSource =>
-        Option(new JFile(dir.getAbsolutePath + ".check"))
+        Option(new JFile(ts.dir.getAbsolutePath + ".check"))
     }).filter(_.exists)
 
-    final def diffTest(sourceName: String, checkFile: JFile, actual: List[String]) = {
+    final def diffTest(testSource: TestSource, checkFile: JFile, actual: List[String]) = {
       val expected = Source.fromFile(checkFile, "UTF-8").getLines().toList
-      for (msg <- diffMessage(sourceName, actual, expected)) {
-        fail(msg)
+      for (msg <- diffMessage(testSource.title, actual, expected)) {
+        echo(msg)
+        failTestSource(testSource)
         dumpOutputToFile(checkFile, actual)
       }
     }
 
-    final def encapsulatedCompilation(testSource: TestSource) = new LoggedRunnable { self =>
+    def encapsulatedCompilation(testSource: TestSource) = new LoggedRunnable { self =>
       def checkTestSource(): Unit = tryCompile(testSource) {
         val reporters = compileTestSource(testSource)
         onComplete(testSource, reporters, self)
@@ -224,10 +228,10 @@ trait ParallelTesting extends RunnerOrchestration { self =>
       }
     }
 
-    final def onComplete(testSource: TestSource, reporters: Seq[TestReporter], logger: LoggedRunnable): Unit =
-      testFailed(testSource, reporters).fold(
-               onSuccess(testSource, reporters, logger                                )
-      , msg => onFailure(testSource, reporters, logger, Option(msg).filter(_.nonEmpty)) )
+    final def onComplete(testSource: TestSource, reporters: Seq[TestReporter], logger: LoggedRunnable): Unit = (
+      testFailed(testSource, reporters).fold
+        (       onSuccess(testSource, reporters, logger                                ) )
+        (msg => onFailure(testSource, reporters, logger, Option(msg).filter(_.nonEmpty)) ) )
 
     def testFailed(testSource: TestSource, reporters: Seq[TestReporter]): Option[String] =
       Option(reporters.exists(reporterFailed)).map(_ => s"Compilation failed for: '${testSource.title}'")
@@ -621,8 +625,8 @@ trait ParallelTesting extends RunnerOrchestration { self =>
     private[this] def verifyOutput(checkFile: Option[JFile], dir: JFile, testSource: TestSource, warnings: Int) = {
       if (Properties.testsNoRun) addNoRunWarning()
       else runMain(testSource.runClassPath) match {
-        case Success(_) if !checkFile.isDefined || !checkFile.get.exists => // success!
-        case Success(output) => checkFile.foreach(diffTest(testSource, _, output.linesIterator.toSeq))
+        case Success(_) if !checkFile.isDefined || !checkFile.get.exists =>
+        case Success(output) => checkFile.foreach(diffTest(testSource, _, output.linesIterator.toList))
         case Failure(output) =>
           echo(s"Test '${testSource.title}' failed with output:")
           echo(output)
@@ -639,25 +643,26 @@ trait ParallelTesting extends RunnerOrchestration { self =>
 
   private final class NegTest(testSources: List[TestSource], times: Int, threadLimit: Option[Int], suppressAllOutput: Boolean)(implicit summaryReport: SummaryReporting)
   extends Test(testSources, times, threadLimit, suppressAllOutput) {
-    override def testFailed(reporters: Seq[TestReporter]): Option[() => Unit] = {
+    override def testFailed(testSource: TestSource, reporters: Seq[TestReporter]): Option[String] = {
       val compilerCrashed            = reporters.exists(_.compilerCrashed)
       val (errorMap, expectedErrors) = getErrorMapAndExpectedCount(testSource.sourceFiles)
       val actualErrors               = reporters.foldLeft(0)(_ + _.errorCount)
+      val hasMissingAnnotations      = getMissingExpectedErrors(errorMap, reporters.iterator.flatMap(_.errors))
 
            if (compilerCrashed               ) Some(s"Compiler crashed when compiling: ${testSource.title}"                                                             )
       else if (actualErrors   == 0           ) Some(s"\nNo errors found when compiling neg test $testSource"                                                            )
       else if (expectedErrors != actualErrors) Some(s"\nWrong number of errors encountered when compiling $testSource, expected: $expectedErrors, actual: $actualErrors")
-      else if (hasMissingAnnotations()       ) Some(s"\nErrors found on incorrect row numbers when compiling $testSource"                                               )
+      else if (hasMissingAnnotations         ) Some(s"\nErrors found on incorrect row numbers when compiling $testSource"                                               )
       else if (!errorMap.isEmpty             ) Some(s"\nExpected error(s) have {<error position>=<unreported error>}: $errorMap"                                        )
       else                                     None
     }
 
     override def onSuccess(testSource: TestSource, reporters: Seq[TestReporter], logger: LoggedRunnable): Unit =
-      checkFile(testSource).foreach(diffTest(testSource.title, _, reporterOutputLines(reporters)))
+      checkFile(testSource).foreach(diffTest(testSource, _, reporterOutputLines(reporters)))
 
-    def reporterOutputLines(reporters: List[TestReporter]): List[String] =
+    def reporterOutputLines(reporters: Seq[TestReporter]): List[String] =
       reporters.flatMap(_.allErrors).sortBy(_.pos.source.toString).flatMap { error =>
-        (error.pos.span.toString + " in " + error.pos.source.file.name) :: error.getMessage().linesIterator.toList }
+        (error.pos.span.toString + " in " + error.pos.source.file.name) :: error.getMessage().linesIterator.toList }.toList
 
     // In neg-tests we allow two types of error annotations,
     // "nopos-error" which doesn't care about position and "error" which
@@ -665,7 +670,7 @@ trait ParallelTesting extends RunnerOrchestration { self =>
     //
     // We collect these in a map `"file:row" -> numberOfErrors`, for
     // nopos errors we save them in `"file" -> numberOfNoPosErrors`
-    def getErrorMapAndExpectedCount(files: Array[JFile]): (HashMap[String, Integer], Int) = {
+    def getErrorMapAndExpectedCount(files: Seq[JFile]): (HashMap[String, Integer], Int) = {
       val errorMap = new HashMap[String, Integer]()
       var expectedErrors = 0
       files.filter(_.getName.endsWith(".scala")).foreach { file =>
@@ -711,7 +716,7 @@ trait ParallelTesting extends RunnerOrchestration { self =>
 
   private final class NoCrashTest(testSources: List[TestSource], times: Int, threadLimit: Option[Int], suppressAllOutput: Boolean)(implicit summaryReport: SummaryReporting)
     extends Test(testSources, times, threadLimit, suppressAllOutput) {
-    override protected def encapsulatedCompilation(testSource: TestSource) = new LoggedRunnable {
+    override def encapsulatedCompilation(testSource: TestSource) = new LoggedRunnable {
       def checkTestSource(): Unit = tryCompile(testSource) {
         def fail(msg: String): Nothing = {
           echo(msg)
