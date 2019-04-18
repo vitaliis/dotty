@@ -43,13 +43,18 @@ class CompilationTests extends ParallelTesting {
   }
 
   @Test def exampleNeg: Unit = {
-    implicit val testGroup: TestGroup = TestGroup("examplePos")
+    implicit val testGroup: TestGroup = TestGroup("exampleNeg")
     compileFilesInDir("tests/playground/neg", defaultOptions).checkExpectedErrors()
   }
 
   @Test def exampleRun: Unit = {
     implicit val testGroup: TestGroup = TestGroup("exampleRun")
     compileFilesInDir("tests/playground/run", defaultOptions).checkRuns()
+  }
+
+  @Test def exampleFuzzy: Unit = {
+    implicit val testGroup: TestGroup = TestGroup("exampleFuzzy")
+    compileFilesInDir("tests/playground/fuzzy", defaultOptions).checkNoCrash()
   }
 
   @Test def pos: Unit = {

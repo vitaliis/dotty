@@ -186,8 +186,8 @@ trait ParallelTesting extends RunnerOrchestration { self =>
   private trait CompilationLogic { this: Test =>
     val suppressErrors = false
 
-    final def compileTestSource(testSource: TestSource): List[TestReporter] =
-      testSource match {
+    final def compileTestSource(testSource: TestSource): Either[Throwable, List[TestReporter]] =
+      Try(testSource match {
         case testSource @ JointCompilationSource(name, files, flags, outDir, fromTasty, decompilation) =>
           val reporter =
             if (fromTasty) compileFromTasty(               flags, suppressErrors, outDir)
@@ -196,7 +196,7 @@ trait ParallelTesting extends RunnerOrchestration { self =>
 
         case testSource @ SeparateCompilationSource(_, dir, flags, outDir) =>
           testSource.compilationGroups.map(files => compile(files, flags, suppressErrors, outDir))  // TODO? only `compile` option?
-      }
+      }).toEither
 
     final def countErrorsAndWarnings(reporters: Seq[TestReporter]): (Int, Int) =
       reporters.foldLeft((0, 0)) { case ((err, warn), r) => (err + r.errorCount, warn + r.warningCount) }
@@ -224,14 +224,16 @@ trait ParallelTesting extends RunnerOrchestration { self =>
 
     def encapsulatedCompilation(testSource: TestSource) = new LoggedRunnable { self =>
       def checkTestSource(): Unit = tryCompile(testSource) {
-        val reporters = compileTestSource(testSource)
-        onComplete(testSource, reporters, self)
+        val reportersOrCrash = compileTestSource(testSource)
+        onComplete(testSource, reportersOrCrash, self)
         registerCompletion()
       }
     }
 
-    final def onComplete(testSource: TestSource, reporters: Seq[TestReporter], logger: LoggedRunnable): Unit = (
-      testFailed(testSource, reporters).fold
+    final def onComplete(testSource: TestSource, reportersOrCrash: Either[Throwable, Seq[TestReporter]], logger: LoggedRunnable): Unit =
+      reportersOrCrash.fold(
+        exn => onFailure(testSource, Nil, logger, Some(s"Fatal compiler crash when compiling: ${testSource.title}:\n${exn.getMessage}\n${exn.getStackTrace.mkString("\n")}"))
+      , reporters => testFailed(testSource, reporters).fold
         (       onSuccess(testSource, reporters, logger                                ) )
         (msg => onFailure(testSource, reporters, logger, Option(msg).filter(_.nonEmpty)) ) )
 
@@ -646,7 +648,7 @@ trait ParallelTesting extends RunnerOrchestration { self =>
   private final class NegTest(testSources: List[TestSource], times: Int, threadLimit: Option[Int], suppressAllOutput: Boolean)(implicit summaryReport: SummaryReporting)
   extends Test(testSources, times, threadLimit, suppressAllOutput) {
     override val suppressErrors = true
-    
+
     override def testFailed(testSource: TestSource, reporters: Seq[TestReporter]): Option[String] = {
       val compilerCrashed            = reporters.exists(_.compilerCrashed)
       val (errorMap, expectedErrors) = getErrorMapAndExpectedCount(testSource.sourceFiles)
@@ -719,29 +721,9 @@ trait ParallelTesting extends RunnerOrchestration { self =>
   }
 
   private final class NoCrashTest(testSources: List[TestSource], times: Int, threadLimit: Option[Int], suppressAllOutput: Boolean)(implicit summaryReport: SummaryReporting)
-    extends Test(testSources, times, threadLimit, suppressAllOutput) {
-    override def encapsulatedCompilation(testSource: TestSource) = new LoggedRunnable {
-      def checkTestSource(): Unit = tryCompile(testSource) {
-        def fail(msg: String): Nothing = {
-          echo(msg)
-          failTestSource(testSource)
-          ???
-        }
-        testSource match {
-          case testSource@JointCompilationSource(_, files, flags, outDir, fromTasty, decompilation) =>
-            val sourceFiles = testSource.sourceFiles
-            val reporter =
-              try compile(sourceFiles, flags, true, outDir)
-              catch {
-                case ex: Throwable => fail(s"Fatal compiler crash when compiling: ${testSource.title}")
-              }
-            if (reporter.compilerCrashed)
-              fail(s"Compiler crashed when compiling: ${testSource.title}")
-          case testSource@SeparateCompilationSource(_, dir, flags, outDir) => unsupported("NoCrashTest - SeparateCompilationSource")
-        }
-        registerCompletion()
-      }
-    }
+  extends Test(testSources, times, threadLimit, suppressAllOutput) {
+    override val suppressErrors = true
+    override def testFailed(testSource: TestSource, reporters: Seq[TestReporter]): Option[String] = None
   }
 
   def diffMessage(sourceTitle: String, outputLines: Seq[String], checkLines: Seq[String]): Option[String] = {
