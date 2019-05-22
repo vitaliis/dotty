@@ -54,6 +54,26 @@ But the following operations would lead to type errors:
   l / l2                  // error: `/` is not a member fo Logarithm
 ```
 
+Advantage over value class is that you can not pass a value of original (right side) aliased type where the opaque aliased type is expected. For example:
+```scala
+  // TODO: change to Int and some specific count example to simplify it 
+  // (or example with ID and String)
+  type LogarithmAliased = Double 
+  opaque type LogarithmOpaque = Double
+  object LogarithmOpaque {
+    def apply(d: Double): LogarithmOpaque = d
+  }
+  
+  val la = 1.0
+  val lo = LogarithmOpaque(1.0)
+  def op1(l: LogarithmOpaque) = ???
+  def op2(l: LogarithmAliased) = ???
+  op1(la) // TODO: document results
+  op1(lo)
+  op2(la)
+  op2(lo)
+```
+
 `opaque` is a [soft modifier](../soft-modifier.html).
 
 For more details, see [Scala SIP 35](https://docs.scala-lang.org/sips/opaque-types.html).
